@@ -3,11 +3,12 @@ package main
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"image"
 	"image/color"
 	"os"
 	"strings"
+
+	"github.com/go-audio/audio"
 )
 
 type wadinfo_t struct {
@@ -29,6 +30,13 @@ type sprite_lump_t struct {
 	Top_ofst  int16
 }
 
+type dmx_lump_t struct {
+	Format      uint16
+	Sample_rate uint16
+	Sample_cnt  uint32
+	Data        []uint8
+}
+
 type wadfile_t struct {
 	wadinfo   wadinfo_t
 	directory map[string]filelump_t
@@ -36,7 +44,7 @@ type wadfile_t struct {
 }
 
 func LoadWadFromPath(path string) (wadfile_t, error) {
-	fmt.Println(path)
+	// TODO: load wad into memory once and then perform actions on buffer
 	w := wadfile_t{}
 	w.wadinfo, _ = LoadWadHeader(path)
 
@@ -134,4 +142,26 @@ func (w wadfile_t) DecodeImage(key string) *image.RGBA {
 		}
 	}
 	return img
+}
+
+func (w wadfile_t) DecodeSound(key string) audio.IntBuffer {
+	audio_lump_info := w.directory[key]
+
+	dmx_lump := dmx_lump_t{
+		Format:      binary.LittleEndian.Uint16(w.raw_file[audio_lump_info.Filepos : audio_lump_info.Filepos+2]),
+		Sample_rate: binary.LittleEndian.Uint16(w.raw_file[audio_lump_info.Filepos+2 : audio_lump_info.Filepos+4]),
+		Sample_cnt:  binary.LittleEndian.Uint32(w.raw_file[audio_lump_info.Filepos+4 : audio_lump_info.Filepos+8]),
+	}
+	dmx_lump.Data = make([]uint8, dmx_lump.Sample_cnt)
+	copy(dmx_lump.Data[:], w.raw_file[audio_lump_info.Filepos+8:audio_lump_info.Filepos+8+int32(dmx_lump.Sample_cnt)])
+	ret := audio.IntBuffer{
+		SourceBitDepth: 8,
+		Format:         &audio.Format{NumChannels: 1, SampleRate: int(dmx_lump.Sample_rate)},
+	}
+	ret.Data = make([]int, dmx_lump.Sample_cnt)
+	for i := 0; i < len(ret.Data); i++ {
+		ret.Data[i] = int(dmx_lump.Data[i])
+	}
+
+	return ret
 }

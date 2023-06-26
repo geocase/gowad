@@ -1,7 +1,10 @@
-module wad_viewer
+module wadlib
 
 go 1.20
 
-require github.com/gonutz/wui/v2 v2.8.0
+require (
+	github.com/go-audio/audio v1.0.0
+	github.com/go-audio/wav v1.1.0
+)
 
-require github.com/gonutz/w32/v2 v2.2.2 // indirect
+require github.com/go-audio/riff v1.0.0 // indirect
