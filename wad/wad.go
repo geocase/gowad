@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"os"
 	"strings"
+	"fmt"
 
 	"github.com/go-audio/audio"
 )
@@ -43,8 +44,18 @@ type wadfile_t struct {
 	raw_file  []byte
 }
 
-func LoadWadFromPath(path string) (wadfile_t, error) {
+func (w wadfile_t) Test(key string) {
+	fmt.Println(key)
+	for i := range w.directory {
+		if  strings.Trim(string(i), string(0)) == key {
+			fmt.Println(i)
+		}
+	}
+}
+
+func LoadWadFromPath(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
 	// TODO: load wad into memory once and then perform actions on buffer
+	// TODO: decide how to store map lumps
 	w := wadfile_t{}
 	w.wadinfo, _ = LoadWadHeader(path)
 
@@ -54,9 +65,26 @@ func LoadWadFromPath(path string) (wadfile_t, error) {
 	f, _ := os.Open(path)
 	f.Seek(int64(w.wadinfo.Infotableofs), 0)
 	binary.Read(f, binary.LittleEndian, &raw_dir)
+
+	map_lump_names := []string{"THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SEGS", "SSECTORS", "NODES", "SECTORS", "REJECT", "BLOCKMAP",} // THIS ORDER IS IMPORTANT
+
 	for i := 0; i < len(raw_dir); i++ {
 		clean := strings.Trim(string(raw_dir[i].Name[:]), string(0))
-		w.directory[clean] = raw_dir[i]
+		if (clean[0] == 'E' && clean[2] == 'M') || 
+		(clean[0] == 'M' && clean[1] == 'A' && clean[2] == 'P') {
+			fmt.Println(clean)
+			i += 1
+			if(ignore_map_data_lumps) {
+				// load data into unique map lump struct
+				for _, s := range map_lump_names {
+					clean = strings.Trim(string(raw_dir[i].Name[:]), string(0))
+					fmt.Println(clean, " ", s == clean)
+					i += 1
+				}
+			}
+		} else {
+			w.directory[clean] = raw_dir[i]
+		}
 	}
 	f.Seek(0, 0)
 	file_stat, _ := f.Stat()
@@ -64,6 +92,11 @@ func LoadWadFromPath(path string) (wadfile_t, error) {
 	w.raw_file = make([]byte, file_size)
 	binary.Read(f, binary.LittleEndian, &w.raw_file)
 	f.Close()
+	if ignore_map_data_lumps {
+		for _, n := range map_lump_names {
+			delete(w.directory, n)
+		}
+	}
 	return w, nil
 }
 
