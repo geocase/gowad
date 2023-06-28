@@ -4,12 +4,12 @@ import (
 	"image/png"
 	"log"
 	"os"
-
 	"github.com/go-audio/wav"
+	"wadlib/wad" 
 )
 
 func main() {
-	current_wad, _ := LoadWadFromPath("DOOM.WAD")
+	current_wad, _ := wad.LoadWadFromPath("DOOM.WAD")
 
 	img_target := "PLAYA1"
 	pinky := current_wad.DecodeImage(img_target)
