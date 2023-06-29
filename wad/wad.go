@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"log"
 	"os"
 	"strings"
 
@@ -42,6 +41,7 @@ type dmx_lump_t struct {
 type wadfile_t struct {
 	wadinfo   wadinfo_t
 	directory map[string]filelump_t
+	lumps     map[string]rawlump_t
 	raw_file  []byte
 }
 
@@ -63,11 +63,13 @@ type rawlump_t struct {
 func Load(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
 	// TODO: load wad into memory once and then perform actions on buffer
 	// TODO: decide how to store map lumps
+	// TODO: Tag lumps according to special pointer lumps
 	w := wadfile_t{}
 	w.wadinfo, _ = LoadWadHeader(path)
 
 	raw_dir := make([]filelump_t, w.wadinfo.Numlumps)
 	w.directory = make(map[string]filelump_t)
+	w.lumps = make(map[string]rawlump_t)
 	// playpal_lump_position := filelump_t{}
 	f, _ := os.Open(path)
 	f.Seek(int64(w.wadinfo.Infotableofs), 0)
@@ -91,6 +93,11 @@ func Load(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
 			}
 		} else {
 			w.directory[clean] = raw_dir[i]
+			new_lump := rawlump_t{name: clean, size: w.directory[clean].Size}
+			f.Seek(int64(w.directory[clean].Filepos), 0)
+			new_lump.data = make([]byte, w.directory[clean].Size)
+			binary.Read(f, binary.LittleEndian, new_lump.data)
+			w.lumps[clean] = new_lump
 		}
 	}
 	f.Seek(0, 0)
@@ -105,6 +112,80 @@ func Load(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
 		}
 	}
 	return w, nil
+}
+
+func (w wadfile_t) Lump(key string) rawlump_t {
+	return w.lumps[key]
+}
+
+func (l rawlump_t) AsPlaypal() *image.RGBA {
+	ret := image.NewRGBA(image.Rect(0, 0, 256, 1))
+	for x := 0; x < len(l.data)/3; x++ {
+		i := x * 3
+		ret.Set(x, 0, color.NRGBA{
+			R: l.data[i+0],
+			G: l.data[i+1],
+			B: l.data[i+2],
+			A: 255,
+		})
+	}
+	return ret
+}
+
+func (l rawlump_t) AsSprite(playpal *image.RGBA) *image.RGBA {
+	sprite := sprite_lump_t{}
+	sprite.Width = binary.LittleEndian.Uint16(l.data[0:2])
+	sprite.Height = binary.LittleEndian.Uint16(l.data[2:4])
+	lump_column_offsets := make([]uint32, sprite.Width)
+	for i := 0; i < int(sprite.Width); i++ {
+		pos := 8 + (i * 4)
+		lump_column_offsets[i] = binary.LittleEndian.Uint32(l.data[pos : pos+4])
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, int(sprite.Width), int(sprite.Height)))
+
+	for i := 0; i < int(sprite.Width-1); i++ {
+		offset := lump_column_offsets[i]
+		row_start := uint8(0)
+		for row_start != 255 {
+			row_start = l.data[offset]
+			offset += 1
+			if row_start == 255 {
+				break
+			}
+			length := uint8(l.data[offset])
+			offset += 1
+			offset += 1
+			data_slice := l.data[offset : offset+uint32(length)]
+			offset += uint32(length)
+			for l := 0; l < int(length); l++ {
+				pcolor := playpal.At(int(data_slice[l]), 0)
+				img.Set(i, l+int(row_start), pcolor)
+			}
+			offset += 1
+		}
+	}
+	return img
+}
+
+func (l rawlump_t) AsDMXSound() *audio.IntBuffer {
+	dmx_lump := dmx_lump_t{
+		Format:      binary.LittleEndian.Uint16(l.data[0:2]),
+		Sample_rate: binary.LittleEndian.Uint16(l.data[2:4]),
+		Sample_cnt:  binary.LittleEndian.Uint32(l.data[4:8]),
+	}
+	dmx_lump.Data = make([]uint8, dmx_lump.Sample_cnt)
+	copy(dmx_lump.Data[:], l.data[8:8+int32(dmx_lump.Sample_cnt)])
+	ret := audio.IntBuffer{
+		SourceBitDepth: 8,
+		Format:         &audio.Format{NumChannels: 1, SampleRate: int(dmx_lump.Sample_rate)},
+	}
+	ret.Data = make([]int, dmx_lump.Sample_cnt)
+	for i := 0; i < len(ret.Data); i++ {
+		ret.Data[i] = int(dmx_lump.Data[i])
+	}
+
+	return &ret
 }
 
 func (f filelump_t) InfoString() string {
@@ -128,86 +209,4 @@ func LoadWadHeader(path string) (wadinfo_t, error) {
 	}
 	f.Close()
 	return wad_info, nil
-}
-
-func (w wadfile_t) DecodePlaypal(key string) (*image.RGBA, error) {
-	lump, success := w.directory[key]
-	if !success {
-		return &image.RGBA{}, errors.New("Lump " + key + " does not exist.")
-	}
-	palette_slice := w.raw_file[lump.Filepos : lump.Filepos+lump.Size]
-	ret := image.NewRGBA(image.Rect(0, 0, 256, 1))
-	for x := 0; x < len(palette_slice)/3; x++ {
-		i := x * 3
-		ret.Set(x, 0, color.NRGBA{
-			R: palette_slice[i+0],
-			G: palette_slice[i+1],
-			B: palette_slice[i+2],
-			A: 255,
-		})
-	}
-	return ret, nil
-}
-
-func (w wadfile_t) DecodeImage(key string) *image.RGBA {
-	playpal, err := w.DecodePlaypal("PLAYPAL")
-	if err != nil {
-		log.Fatal("Unable to decode PLAYPAL lump for image decoding\n" + err.Error())
-	}
-	lump := w.directory[key]
-	sprite := sprite_lump_t{}
-	sprite.Width = binary.LittleEndian.Uint16(w.raw_file[lump.Filepos : lump.Filepos+2])
-	sprite.Height = binary.LittleEndian.Uint16(w.raw_file[lump.Filepos+2 : lump.Filepos+2+2])
-	lump_column_offsets := make([]uint32, sprite.Width)
-	for i := 0; i < int(sprite.Width); i++ {
-		pos := int(lump.Filepos) + 8 + (i * 4)
-		lump_column_offsets[i] = binary.LittleEndian.Uint32(w.raw_file[pos : pos+4])
-	}
-
-	img := image.NewRGBA(image.Rect(0, 0, int(sprite.Width), int(sprite.Height)))
-
-	for i := 0; i < int(sprite.Width-1); i++ {
-		offset := lump_column_offsets[i] + uint32(lump.Filepos)
-		row_start := uint8(0)
-		for row_start != 255 {
-			row_start = w.raw_file[offset]
-			offset += 1
-			if row_start == 255 {
-				break
-			}
-			length := uint8(w.raw_file[offset])
-			offset += 1
-			offset += 1
-			data_slice := w.raw_file[offset : offset+uint32(length)]
-			offset += uint32(length)
-			for l := 0; l < int(length); l++ {
-				pcolor := playpal.At(int(data_slice[l]), 0)
-				img.Set(i, l+int(row_start), pcolor)
-			}
-			offset += 1
-		}
-	}
-	return img
-}
-
-func (w wadfile_t) DecodeSound(key string) audio.IntBuffer {
-	audio_lump_info := w.directory[key]
-
-	dmx_lump := dmx_lump_t{
-		Format:      binary.LittleEndian.Uint16(w.raw_file[audio_lump_info.Filepos : audio_lump_info.Filepos+2]),
-		Sample_rate: binary.LittleEndian.Uint16(w.raw_file[audio_lump_info.Filepos+2 : audio_lump_info.Filepos+4]),
-		Sample_cnt:  binary.LittleEndian.Uint32(w.raw_file[audio_lump_info.Filepos+4 : audio_lump_info.Filepos+8]),
-	}
-	dmx_lump.Data = make([]uint8, dmx_lump.Sample_cnt)
-	copy(dmx_lump.Data[:], w.raw_file[audio_lump_info.Filepos+8:audio_lump_info.Filepos+8+int32(dmx_lump.Sample_cnt)])
-	ret := audio.IntBuffer{
-		SourceBitDepth: 8,
-		Format:         &audio.Format{NumChannels: 1, SampleRate: int(dmx_lump.Sample_rate)},
-	}
-	ret.Data = make([]int, dmx_lump.Sample_cnt)
-	for i := 0; i < len(ret.Data); i++ {
-		ret.Data[i] = int(dmx_lump.Data[i])
-	}
-
-	return ret
 }
