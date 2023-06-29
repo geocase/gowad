@@ -3,11 +3,12 @@ package wad
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
+	"log"
 	"os"
 	"strings"
-	"fmt"
 
 	"github.com/go-audio/audio"
 )
@@ -47,13 +48,19 @@ type wadfile_t struct {
 func (w wadfile_t) Test(key string) {
 	fmt.Println(key)
 	for i := range w.directory {
-		if  strings.Trim(string(i), string(0)) == key {
+		if strings.Trim(string(i), string(0)) == key {
 			fmt.Println(i)
 		}
 	}
 }
 
-func LoadWadFromPath(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
+type rawlump_t struct {
+	name string
+	size int32
+	data []byte
+}
+
+func Load(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
 	// TODO: load wad into memory once and then perform actions on buffer
 	// TODO: decide how to store map lumps
 	w := wadfile_t{}
@@ -66,15 +73,15 @@ func LoadWadFromPath(path string, ignore_map_data_lumps bool) (wadfile_t, error)
 	f.Seek(int64(w.wadinfo.Infotableofs), 0)
 	binary.Read(f, binary.LittleEndian, &raw_dir)
 
-	map_lump_names := []string{"THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SEGS", "SSECTORS", "NODES", "SECTORS", "REJECT", "BLOCKMAP",} // THIS ORDER IS IMPORTANT
+	map_lump_names := []string{"THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SEGS", "SSECTORS", "NODES", "SECTORS", "REJECT", "BLOCKMAP"} // THIS ORDER IS IMPORTANT
 
 	for i := 0; i < len(raw_dir); i++ {
 		clean := strings.Trim(string(raw_dir[i].Name[:]), string(0))
-		if (clean[0] == 'E' && clean[2] == 'M') || 
-		(clean[0] == 'M' && clean[1] == 'A' && clean[2] == 'P') {
+		if (clean[0] == 'E' && clean[2] == 'M') ||
+			(clean[0] == 'M' && clean[1] == 'A' && clean[2] == 'P') {
 			fmt.Println(clean)
 			i += 1
-			if(ignore_map_data_lumps) {
+			if ignore_map_data_lumps {
 				// load data into unique map lump struct
 				for _, s := range map_lump_names {
 					clean = strings.Trim(string(raw_dir[i].Name[:]), string(0))
@@ -123,8 +130,11 @@ func LoadWadHeader(path string) (wadinfo_t, error) {
 	return wad_info, nil
 }
 
-func (w wadfile_t) DecodePlaypal(key string) *image.RGBA {
-	lump := w.directory[key]
+func (w wadfile_t) DecodePlaypal(key string) (*image.RGBA, error) {
+	lump, success := w.directory[key]
+	if !success {
+		return &image.RGBA{}, errors.New("Lump " + key + " does not exist.")
+	}
 	palette_slice := w.raw_file[lump.Filepos : lump.Filepos+lump.Size]
 	ret := image.NewRGBA(image.Rect(0, 0, 256, 1))
 	for x := 0; x < len(palette_slice)/3; x++ {
@@ -136,11 +146,14 @@ func (w wadfile_t) DecodePlaypal(key string) *image.RGBA {
 			A: 255,
 		})
 	}
-	return ret
+	return ret, nil
 }
 
 func (w wadfile_t) DecodeImage(key string) *image.RGBA {
-	playpal := w.DecodePlaypal("PLAYPAL")
+	playpal, err := w.DecodePlaypal("PLAYPAL")
+	if err != nil {
+		log.Fatal("Unable to decode PLAYPAL lump for image decoding\n" + err.Error())
+	}
 	lump := w.directory[key]
 	sprite := sprite_lump_t{}
 	sprite.Width = binary.LittleEndian.Uint16(w.raw_file[lump.Filepos : lump.Filepos+2])
