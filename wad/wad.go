@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"os"
 	"strings"
 
@@ -39,25 +40,100 @@ type dmx_lump_t struct {
 }
 
 type wadfile_t struct {
-	wadinfo   wadinfo_t
-	directory map[string]filelump_t
-	lumps     map[string]rawlump_t
-	raw_file  []byte
+	wadinfo  wadinfo_t
+	lumps    map[string]rawlump_t
+	raw_file []byte
 }
 
-func (w wadfile_t) Test(key string) {
-	fmt.Println(key)
-	for i := range w.directory {
-		if strings.Trim(string(i), string(0)) == key {
-			fmt.Println(i)
-		}
-	}
-}
+const (
+	LUMP_HINT_UNDEF  = iota
+	LUMP_HINT_SPRITE = iota
+)
 
 type rawlump_t struct {
-	name string
-	size int32
-	data []byte
+	name      [8]byte
+	size      int32
+	type_hint int
+	data      []byte
+}
+
+func (rl *rawlump_t) SetName(n string) {
+	copy(rl.name[:], n)
+}
+
+func New() wadfile_t {
+	id := [4]byte{'P', 'W', 'A', 'D'}
+	w := wadfile_t{
+		wadinfo: wadinfo_t{
+			Identification: id,
+			Numlumps:       0,
+			Infotableofs:   0,
+		},
+		lumps: make(map[string]rawlump_t),
+	}
+
+	return w
+}
+
+func (wf wadfile_t) Write(w io.WriteSeeker) {
+	// organize data
+	sprites := make([]rawlump_t, 0)
+	undefs := make([]rawlump_t, 0)
+	directory := make([]filelump_t, 0)
+
+	sprites = append(sprites, rawlump_t{
+		name:      [8]byte{'S', '_', 'S', 'T', 'A', 'R', 'T'},
+		size:      0,
+		type_hint: LUMP_HINT_UNDEF,
+		data:      nil,
+	})
+
+	for _, l := range wf.lumps {
+		switch l.type_hint {
+		case LUMP_HINT_UNDEF:
+			undefs = append(undefs, l)
+		case LUMP_HINT_SPRITE:
+			sprites = append(sprites, l)
+		}
+	}
+
+	sprites = append(sprites, rawlump_t{
+		name:      [8]byte{'S', '_', 'E', 'N', 'D', 0, 0, 0},
+		size:      0,
+		type_hint: LUMP_HINT_UNDEF,
+		data:      nil,
+	})
+
+	offset := 12 // 4 bytes, 2 int32s = 12 bytes
+	w.Seek(int64(offset), 0)
+
+	for _, u := range undefs {
+		binary.Write(w, binary.LittleEndian, u.data)
+		directory = append(directory, filelump_t{Filepos: int32(offset),
+			Size: u.size,
+			Name: u.name})
+		offset += int(u.size)
+	}
+
+	for _, i := range sprites {
+		if i.size != 0 {
+			binary.Write(w, binary.LittleEndian, i.data)
+		}
+		directory = append(directory, filelump_t{Filepos: int32(offset),
+			Size: i.size,
+			Name: i.name})
+		offset += int(i.size)
+	}
+	wf.wadinfo.Numlumps = int32(len(undefs) + len(sprites))
+	wf.wadinfo.Infotableofs = int32(offset)
+	for _, dir := range directory {
+		binary.Write(w, binary.LittleEndian, dir)
+		fmt.Println(string(dir.Name[:]))
+	}
+
+	w.Seek(0, 0)
+	binary.Write(w, binary.LittleEndian, wf.wadinfo)
+
 }
 
 func Load(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
@@ -68,34 +144,38 @@ func Load(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
 	w.wadinfo, _ = LoadWadHeader(path)
 
 	raw_dir := make([]filelump_t, w.wadinfo.Numlumps)
-	w.directory = make(map[string]filelump_t)
 	w.lumps = make(map[string]rawlump_t)
-	// playpal_lump_position := filelump_t{}
 	f, _ := os.Open(path)
 	f.Seek(int64(w.wadinfo.Infotableofs), 0)
 	binary.Read(f, binary.LittleEndian, &raw_dir)
 
 	map_lump_names := []string{"THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SEGS", "SSECTORS", "NODES", "SECTORS", "REJECT", "BLOCKMAP"} // THIS ORDER IS IMPORTANT
-
+	type_hint := LUMP_HINT_UNDEF
 	for i := 0; i < len(raw_dir); i++ {
 		clean := strings.Trim(string(raw_dir[i].Name[:]), string(0))
+		if clean == "S_START" {
+			type_hint = LUMP_HINT_SPRITE
+		}
+		if clean == "S_END" {
+			type_hint = LUMP_HINT_UNDEF
+		}
+
 		if (clean[0] == 'E' && clean[2] == 'M') ||
 			(clean[0] == 'M' && clean[1] == 'A' && clean[2] == 'P') {
-			fmt.Println(clean)
 			i += 1
 			if ignore_map_data_lumps {
 				// load data into unique map lump struct
 				for _, s := range map_lump_names {
 					clean = strings.Trim(string(raw_dir[i].Name[:]), string(0))
-					fmt.Println(clean, " ", s == clean)
+					// TODO: this
+					_ = s
 					i += 1
 				}
 			}
 		} else {
-			w.directory[clean] = raw_dir[i]
-			new_lump := rawlump_t{name: clean, size: w.directory[clean].Size}
-			f.Seek(int64(w.directory[clean].Filepos), 0)
-			new_lump.data = make([]byte, w.directory[clean].Size)
+			new_lump := rawlump_t{name: raw_dir[i].Name, size: raw_dir[i].Size, type_hint: type_hint}
+			f.Seek(int64(raw_dir[i].Filepos), 0)
+			new_lump.data = make([]byte, raw_dir[i].Size)
 			binary.Read(f, binary.LittleEndian, new_lump.data)
 			w.lumps[clean] = new_lump
 		}
@@ -106,16 +186,21 @@ func Load(path string, ignore_map_data_lumps bool) (wadfile_t, error) {
 	w.raw_file = make([]byte, file_size)
 	binary.Read(f, binary.LittleEndian, &w.raw_file)
 	f.Close()
-	if ignore_map_data_lumps {
-		for _, n := range map_lump_names {
-			delete(w.directory, n)
-		}
-	}
 	return w, nil
 }
 
 func (w wadfile_t) Lump(key string) rawlump_t {
 	return w.lumps[key]
+}
+
+func (wf *wadfile_t) AddLump(rl rawlump_t) {
+	clean := strings.Trim(string(rl.name[:]), string(0))
+	wf.lumps[clean] = rl
+	wf.wadinfo.Numlumps = int32(len(wf.lumps))
+}
+
+func (l *rawlump_t) SetTypeHint(hint int) {
+	l.type_hint = hint
 }
 
 func (l rawlump_t) AsPlaypal() *image.RGBA {

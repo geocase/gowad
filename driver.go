@@ -9,8 +9,9 @@ import (
 	"github.com/go-audio/wav"
 )
 
+// greyscale resample 80 - 113
 func main() {
-	current_wad, _ := wad.Load("DOOM.WAD", true)
+	current_wad, _ := wad.Load("DOOM1.WAD", true)
 	img_target := "PLAYA1"
 	pp := current_wad.Lump("PLAYPAL").AsPlaypal()
 	playa := current_wad.Lump(img_target).AsSprite(pp)
@@ -28,4 +29,16 @@ func main() {
 		log.Fatal(err)
 	}
 	wav_encoder.Close()
+
+	new_wad := wad.New()
+	switch_sfx := current_wad.Lump(sfx_target)
+	switch_sfx.SetName("DSPISTOL")
+	new_wad.AddLump(switch_sfx)
+	help_gfx := current_wad.Lump("CHGGA0")
+	help_gfx.SetName("PISGA0")
+	new_wad.AddLump(help_gfx)
+
+	wad_out, _ := os.Create("out.wad")
+	new_wad.Write(wad_out)
+	wad_out.Close()
 }
